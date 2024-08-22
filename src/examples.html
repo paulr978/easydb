@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en-US">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>EasyDB Examples</title>
+</head>
+
+<body>
+<script src="./easydb.js"></script>
+
+<script>
+    EasyDB.isDebug = true;
+    EasyDB.initialize();
+
+    EasyDB.migrateDatabase({dbName: 'testdb',
+        migrations: [
+            {url: EasyDB.URL('migrations/update6')},
+            {url: EasyDB.URL('migrations/update7')},
+            {scriptId: 'id_2', runAfterId: 'id_1', upgradeSteps: [
+                EasyDB.Create.Store({storeName: 'mystore4'})
+            ]},
+            {scriptId: 'id_1', runAfterId: 'id_initial', upgradeSteps: [EasyDB.Create.Store({storeName: 'mystore2'})]},
+            {scriptId: 'id_initial', runAfterId: null, upgradeSteps: [
+                EasyDB.Create.Store({storeName: 'mystore1'})
+                ]}
+        ]
+    }).catch(() => {console.log('migration error caught!');});
+
+    /*
+    EasyDB.getDatabase({dbName: 'testdb', isCreateIfNotExists: true}).then(db => {
+        console.log('me1111', this);
+
+        db.setMigration({url: EasyDB.URL('migrations/update7')});
+        db.setMigration({scriptId: 'id_2', runAfterId: 'id_1', upgradeSteps: [
+            EasyDB.DDL.CreateStore('mystore')
+        ]});
+        db.setMigration({scriptId: 'id_3', runAfterId: 'id_2', upgradeSteps: []});
+        db.setMigration({scriptId: 'id_4', runAfterId: 'id_3', upgradeSteps: []});
+        db.setMigration({scriptId: 'id_1', upgradeSteps: []});
+
+        db.setMigrations([
+            {scriptId: 'id_5', runAfterId: 'id_4', upgradeSteps: []},
+            {url: EasyDB.URL('migrations/update6')}
+        ]);
+
+        console.log(db.getMigrationsInOrder());
+
+        class MyModel extends EasyDB.Model {
+            static storeName = 'teststore';
+        }
+
+        db.executeWrite([MyModel], function(myModel) {
+            console.log(myModel);
+        });
+    });
+    */
+
+
+</script>
+</body>
+
+</html>
