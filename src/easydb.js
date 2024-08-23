@@ -34,17 +34,56 @@
         }
     }
 
+    async function asyncStringify(obj, replacer = null, space = 0) {
+        async function processValue(value, key, parent) {
+            if (replacer) {
+                value = await replacer(key, value, parent);
+            }
+
+            if (value && typeof value === "object" && !Array.isArray(value)) {
+                const result = {};
+                for (const [k, v] of Object.entries(value)) {
+                    result[k] = await processValue(v, k, value);
+                }
+                return result;
+            } else if (Array.isArray(value)) {
+                const result = [];
+                for (let i = 0; i < value.length; i++) {
+                    result[i] = await processValue(value[i], i, value);
+                }
+                return result;
+            }
+
+            return value;
+        }
+
+        const processedObj = await processValue(obj, "", null);
+        return JSON.stringify(processedObj, null, space);
+    }
+
     async function createHash(input) {
 
         if(typeof input === 'object' || typeof input === 'function') {
-            input = JSON.stringify(input, function(key, value) {
+
+
+
+            input = await asyncStringify(input, async function(key, value) {
                 if (typeof value === 'function') {
                     return value.toString();
                 }
 
                 if (Array.isArray(value)) {
+                    let values = [];
+                    for(let i = 0; i < value.length; i++) {
+                        if(value[i].calculatedHash) {
+                            values.push(await value[i].calculatedHash);
+                        }
+                        else {
+                            values.push(value[i]);
+                        }
+                    }
                     // Recursively process each item in the array
-                    return value.map(item => {
+                    return values.map(item => {
                         return typeof item === 'function' ? item.toString() : item;
                     });
                 }
@@ -982,9 +1021,6 @@
             return null;
         }
 
-        generateHash() {
-
-        }
     }
 
     EasyDB.Create = {
@@ -1017,6 +1053,7 @@
                 }
 
             }
+            CreateStore.calculatedHash = createHash(args);
             return CreateStore;
         },
         Index: function({storeName, indexName, keyPath, options}) {
