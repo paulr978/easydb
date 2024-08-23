@@ -28,34 +28,22 @@
         ]
     }).catch(() => {console.log('migration error caught!');});
 
-    /*
+
     EasyDB.getDatabase({dbName: 'testdb', isCreateIfNotExists: true}).then(db => {
+
         console.log('me1111', this);
 
-        db.setMigration({url: EasyDB.URL('migrations/update7')});
-        db.setMigration({scriptId: 'id_2', runAfterId: 'id_1', upgradeSteps: [
-            EasyDB.DDL.CreateStore('mystore')
-        ]});
-        db.setMigration({scriptId: 'id_3', runAfterId: 'id_2', upgradeSteps: []});
-        db.setMigration({scriptId: 'id_4', runAfterId: 'id_3', upgradeSteps: []});
-        db.setMigration({scriptId: 'id_1', upgradeSteps: []});
-
-        db.setMigrations([
-            {scriptId: 'id_5', runAfterId: 'id_4', upgradeSteps: []},
-            {url: EasyDB.URL('migrations/update6')}
-        ]);
-
-        console.log(db.getMigrationsInOrder());
 
         class MyModel extends EasyDB.Model {
-            static storeName = 'teststore';
+            static storeName = 'mystore1';
         }
 
         db.executeWrite([MyModel], function(myModel) {
-            console.log(myModel);
+            console.log('myModel', myModel);
         });
+
     });
-    */
+
 
 
 </script>

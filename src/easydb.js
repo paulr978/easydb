@@ -177,44 +177,47 @@
         MakeGetter(this, 'url', () => {return this._url;});
     }
 
-    function EasyTransaction(easydb, mode, modelNames) {
+    function EasyTransaction(easydb, mode, modelClasses) {
         this._easydb = easydb;
         this._mode = mode;
-        this._modelNames = Array.isArray(modelNames) ? modelNames : [modelNames];
+        this._modelClasses = Array.isArray(modelClasses) ? modelClasses : [modelClasses];
         this._storeNames = [];
 
-        for(let i = 0; i < this._modelNames.length; i++) {
-            this._storeNames.push(this._modelNames[i].storeName);
+        for(let i = 0; i < this._modelClasses.length; i++) {
+            this._storeNames.push(this._modelClasses[i].storeName);
         }
 
-        console.log(easydb._database);
+        //console.log(easydb._database);
         this._transaction = easydb._database.transaction(this._storeNames, this._mode);
 
         const self = this;
 
-        this.execute = function(executionFunction) {
+        this.execute = async function(executionFunction) {
 
-            const handler = {
-                construct(target, args) {
-                    const instance = new target(...args);
+            return new Promise(async (resolve, reject) => {
+                const handler = {
+                    construct(target, args) {
+                        const instance = new target(...args);
 
-                    // Bind all instance methods to `self`
-                    return new Proxy(instance, {
-                        get(obj, prop) {
-                            if (typeof obj[prop] === 'function') {
-                                return obj[prop].bind(self);
+                        // Bind all instance methods to `self`
+                        return new Proxy(instance, {
+                            get(obj, prop) {
+                                if (typeof obj[prop] === 'function') {
+                                    return obj[prop].bind(self);
+                                }
+                                return obj[prop];
                             }
-                            return obj[prop];
-                        }
-                    });
-                }
-            };
+                        });
+                    }
+                };
 
-            let hotModels = [];
+                let hotModels = [];
 
-            // Wrap the callback to bind context and proxy class instantiation
-            executionFunction.apply(self, [new Proxy(...hotModels, handler)]);
+                // Wrap the callback to bind context and proxy class instantiation
+                let result = await executionFunction.apply(self, [new Proxy(...hotModels, handler)]);
 
+                resolve(result);
+            });
 
         }
     }
@@ -384,7 +387,7 @@
             this._isClosed = true;
         }
 
-        this.refresh = async function({toVersion, onUpgrade}) {
+        this.refresh = async function({toVersion, onUpgrade, onComplete}) {
 
             if(!self._isClosed) {
                 await self.close();
@@ -396,8 +399,12 @@
             let req = indexedDB.open(self._database.name, toVersion);
 
             return new Promise(async (resolve, reject) => {
-                req.onsuccess = function (event) {
+                req.onsuccess = async function (event) {
                     self._database = this.result;
+
+                    if(onComplete) {
+                        await onComplete(self._database);
+                    }
                     resolve(self);
                 }
 
@@ -460,13 +467,14 @@
         }
         */
 
-        this.executeRead = function(modelNames, executionFunction) {
-            const trx = new EasyTransaction(self, 'readonly', modelNames);
+        this.executeRead = function(modelClasses, executionFunction) {
+            const trx = new EasyTransaction(self, 'readonly', modelClasses);
 
         }
 
-        this.executeWrite = function(modelNames, executionFunction) {
-            const trx = new EasyTransaction(self, 'readwrite', modelNames);
+        this.executeWrite = async function(modelClasses, executionFunction) {
+            const trx = new EasyTransaction(self, 'readwrite', modelClasses);
+            return await trx.execute(executionFunction);
 
         }
 
@@ -477,7 +485,9 @@
         MakeGetter(this, 'isClosed', () => {return this._isClosed;});
     }
 
-    EasyDB.migrateDatabase = function({dbName, migrations, isForceMigration=false}) {
+    EasyDB._MigrationPromises = {};
+
+    EasyDB.migrateDatabase = async function({dbName, migrations, isForceMigration=false}) {
         let _migrationLoadedPromises = [];
         let _migrationsInOrder = [];
         let _migrationsById = {};
@@ -593,7 +603,7 @@
             }
         }
 
-        return new Promise(async (resolve, reject) => {
+        let migrationPromise = new Promise(async (resolve, reject) => {
             await onInit();
 
             await self.setMigrations(migrations);
@@ -609,7 +619,7 @@
                 return;
             }
 
-            let db = await EasyDB.getDatabase({dbName: dbName, isCreateIfNotExists: true});
+            let db = await getDatabase({dbName: dbName, isCreateIfNotExists: true});
 
             let store = mgmtDB._database.transaction([DATABASES_DATASTORE_NAME], 'readonly').objectStore(DATABASES_DATASTORE_NAME);
             const index = store.index('db_name');
@@ -617,20 +627,21 @@
 
             query.onsuccess = async function(event) {
                 let result = this.result;
-                console.log('db info', result);
+                //console.log('db info', result);
 
 
                 try {
                     let upgradeHistory = await getUpgradeHistory({dbId: db.dbId});
-                    console.log('upgradeHistory', upgradeHistory);
+                    //console.log('upgradeHistory', upgradeHistory);
 
                     let migrationUpdates = await preProcessMigrations({dbId: db.dbId, upgradeHistory: upgradeHistory, migrations: _migrationsInOrder});
-                    console.log('migrations to run', migrationUpdates);
+                    //console.log('migrations to run', migrationUpdates);
 
                     let toVersion = db.databaseVersion + migrationUpdates.length;
 
                     if(toVersion === db.databaseVersion) {
                         console.log('no upgrade needed');
+                        resolve();
                         return;
                     }
 
@@ -638,73 +649,25 @@
                     console.log('from and to db version', db.databaseVersion, migrationUpdates.length);
 
                     db.refresh({toVersion: toVersion, onUpgrade: async (dbToUpgrade, trx, event) => {
-                            console.log('onUpgradeNeeded', this);
+                        //console.log('onUpgradeNeeded', this);
 
-                            trx.onabort = function() {
-                                console.log('Upgrade aborted.');
-                                reject();
-                            };
-
-                            trx.onerror = function(event) {
-                                console.error('Transaction error:', event.target.error);
-                                reject();
-                            };
-
-                            let appliedMigrations = await processMigrations({db: dbToUpgrade, trx: trx, dbId: db.dbId, migrations: migrationUpdates});
-                        }});
-
-                    /*
-                    db.close();
-
-                    let upgradeReq = indexedDB.open(db.databaseName, toVersion);
-
-                    upgradeReq.onsuccess = function (event) {
-                        console.log('onsuccess');
-                    };
-
-                    upgradeReq.onupgradeneeded = async function(event) {
-                        console.log('onupgrade');
-
-                        const dbToUpgrade = event.target.result;
-                        const transaction = event.target.transaction;
-
-                        console.log('dbToUpgrade', event, dbToUpgrade);
-
-                        transaction.onabort = function() {
+                        trx.onabort = function() {
                             console.log('Upgrade aborted.');
                             reject();
                         };
 
-                        transaction.onerror = function(event) {
+                        trx.onerror = function(event) {
                             console.error('Transaction error:', event.target.error);
                             reject();
                         };
 
-                        try {
-                            let appliedMigrations = await processMigrations({db: dbToUpgrade, trx: transaction, dbId: db.dbId, migrations: migrationUpdates});
-                            let dbStore = mgmtDB._database.transaction([DATABASES_DATASTORE_NAME], 'readwrite').objectStore(DATABASES_DATASTORE_NAME);
-                            const dbNameIndex = dbStore.index('db_name');
-                            const dbNameQuery = dbNameIndex.get(db.databaseName);
+                        let appliedMigrations = await processMigrations({db: dbToUpgrade, trx: trx, dbId: db.dbId, migrations: migrationUpdates});
 
-                            dbNameQuery.onsuccess = async function(event) {
-                                const dbRecord = event.target.result;
-                                dbRecord.version = toVersion;
-                                dbStore.put(dbRecord);
-                            }
+                    }}, async () => {
+                        db.close();
+                        resolve();
+                    });
 
-                        }
-                        catch(e) {
-                            console.error(e);
-                            transaction.abort();
-                        }
-
-                        //let processedMigrations = await processMigrations()
-                    }
-
-                    upgradeReq.onerror = function (event) {
-                        console.error('error!', event);
-                    };
-                    */
                 }
                 catch(e) {
                     console.error('error detected during migration processing', e);
@@ -719,9 +682,17 @@
                 reject();
             };
         });
+
+        EasyDB._MigrationPromises[dbName] = migrationPromise;
+        return migrationPromise;
     }
 
     EasyDB.getDatabase = async function({dbName, version, options, isCreateIfNotExists = false}) {
+        await onDBOpen(dbName);
+        return await getDatabase({dbName: dbName, version: version, options: options, isCreateIfNotExists: isCreateIfNotExists});
+    }
+
+    const getDatabase = async function({dbName, version, options, isCreateIfNotExists = false}) {
         let isFound = false;
         let db = null;
         let dbs = (await window.indexedDB.databases());
@@ -740,7 +711,7 @@
             if(!isFound) {
                 if(isCreateIfNotExists) {
                     try {
-                        let DB = await EasyDB.getOrCreateDatabase({dbName, version, options});
+                        let DB = await getOrCreateDatabase({dbName, version, options});
                         resolve(DB);
                         return;
                     }
@@ -767,6 +738,11 @@
     }
 
     EasyDB.getOrCreateDatabase = async function({dbName, version, options}) {
+        await onDBOpen(dbName);
+        return await getOrCreateDatabase({dbName: dbName, version: version, options: options});
+    }
+
+    const getOrCreateDatabase = async function({dbName, version, options}) {
         version = version || 1;
 
         return new Promise((resolve, reject) => {
@@ -1005,6 +981,15 @@
         return new Promise((resolve, reject) => {
             _initializationPromise.then(() => {
                 console.log('we are init!!!! yahoo');
+                resolve();
+            });
+        });
+    }
+
+    async function onDBOpen(dbName) {
+        return new Promise((resolve, reject) => {
+            EasyDB._MigrationPromises[dbName].then(() => {
+                console.log('db is ready!');
                 resolve();
             });
         });
