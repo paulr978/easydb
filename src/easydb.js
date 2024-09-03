@@ -171,8 +171,9 @@
         MakeGetter(this, 'downgradeSteps', () => {return this._downgradeSteps;});
     }
 
-    function URL(url) {
+    function URL(url, args) {
         this._url = url;
+        this.args = args || {};
 
         MakeGetter(this, 'url', () => {return this._url;});
     }
@@ -297,7 +298,7 @@
                         continue;
                     }
                     else if(upg.script_id === mig.scriptId && upg.hash !== mig.hash) {
-                        reject(new EasyDBException('Error while preprocessing migrations. Changes were detected in already committed migration script', mig, upg));
+                        reject(new EasyDBException('Error while preprocessing migrations. Changes were detected in already committed migration script.', mig, upg));
                     }
                     else if(upg.script_id !== mig.scriptId) {
                         reject(new EasyDBException('Error while preprocessing migrations. New migration script must be added at the end.', mig, upg));
@@ -306,6 +307,25 @@
                     results.push(mig);
                 }
             }
+
+            for(let i = 0; i < upgradeHistory.length; i++) {
+                let mig = migrations[i];
+                let upg = upgradeHistory[i];
+
+                if(mig === undefined) {
+                    reject(new EasyDBException('Error while preprocessing migrations. Script order or hash does not match migration history.', mig, upg));
+                }
+                else if(upg.script_id === mig.scriptId && upg.hash === mig.hash) {
+                    // do nothing
+                }
+                else if(upg.script_id === mig.scriptId && upg.hash !== mig.hash) {
+                    reject(new EasyDBException('Error while preprocessing migrations. Script order or hash does not match migration history.', mig, upg));
+                }
+                else if(upg.script_id !== mig.scriptId) {
+                    reject(new EasyDBException('Error while preprocessing migrations. New migration script must be added at the end.', mig, upg));
+                }
+            }
+
             resolve(results);
         });
 
@@ -485,9 +505,9 @@
         MakeGetter(this, 'isClosed', () => {return this._isClosed;});
     }
 
-    EasyDB._MigrationPromises = {};
+    const _MigrationPromises = {};
 
-    EasyDB.migrateDatabase = async function({dbName, migrations, isForceMigration=false}) {
+    const migrateDatabase = async function({dbName, migrations, isForceMigration=false}) {
         let _migrationLoadedPromises = [];
         let _migrationsInOrder = [];
         let _migrationsById = {};
@@ -517,12 +537,10 @@
 
         let setMigrationFromURL = async function(url) {
 
-            const boundLoadMigration = EasyDB.Migration.bind(self);
+            const thisArg = self;
+            const boundLoadScript = EasyDB.script.bind(self);
             const context = {
-                thisArg: self,
-                EasyDB: {
-                    Migration: boundLoadMigration
-                }
+                script: boundLoadScript
             };
 
             const p = new Promise(async (resolve, reject) => {
@@ -530,22 +548,39 @@
 
                     let response = await fetch(url.url);
                     if (!response.ok) {
-                        throw new Error('Network response was not ok ' + response.statusText);
+                        reject(Error('Network response was not ok ' + response.statusText));
                     }
 
                     let userCode = await response.text();
 
                     userCode = `
-                    with(context) {
-                        (function() {
-                            ${userCode}
+                        return (async function() {
+                            return await ${userCode}
                         }).call(thisArg);
-                    }
                     `;
 
-                    let f = new Function('context', userCode);
-                    f.call(context.thisArg, context);
-                    resolve();
+                    let argNames = [];
+                    let argValues = [];
+                    for(let name in url.args) {
+                        argNames.push(name);
+                        argValues.push(url.args[name]);
+                    }
+
+                    console.log('argNames', argNames);
+                    console.log('argValues', argValues);
+
+                    const f = new Function('EasyDB', 'thisArg', ...argNames, userCode);
+                    const r = await f.call(thisArg, context, thisArg, ...argValues);
+                    console.log('script result', r);
+
+                    if(Array.isArray(r)) {
+                        await setMigrations(r);
+                    }
+                    else {
+                        await setMigrationFromInline(r);
+                    }
+
+                    resolve(r);
                 }
                 catch(e) {
                     console.error('There has been a problem with your fetch operation:', e);
@@ -588,7 +623,7 @@
             return p;
         }
 
-        this.setMigration = async function({scriptId, runAfterId, upgradeSteps, downgradeSteps, url} = {}) {
+        const setMigration = async function({scriptId, runAfterId, upgradeSteps, downgradeSteps, url} = {}) {
             if(url) {
                 await setMigrationFromURL(url);
             }
@@ -597,16 +632,15 @@
             }
         }
 
-        this.setMigrations = async function(migrations) {
+        const setMigrations = async function(migrations) {
             for(let i = 0; i < migrations.length; i++) {
-                await self.setMigration(migrations[i]);
+                await setMigration(migrations[i]);
             }
         }
 
         let migrationPromise = new Promise(async (resolve, reject) => {
             await onInit();
-
-            await self.setMigrations(migrations);
+            await setMigrations(migrations);
             console.log('migrations loaded!', _migrationsInOrder);
 
             // TODO: this should raise an exception to the user
@@ -683,8 +717,67 @@
             };
         });
 
-        EasyDB._MigrationPromises[dbName] = migrationPromise;
+        _MigrationPromises[dbName] = migrationPromise;
         return migrationPromise;
+    }
+
+    EasyDB.script = async function(callback) {
+        let result = await callback();
+        return new Promise(async (resolve, reject) => {
+            resolve(result);
+        });
+    }
+
+    /**
+     * @typedef {Object} MyContext
+     * @property {function():void} testMe - A function with no arguments
+     * @property {function(string):void} doSomething - A function that takes a string argument
+     * @property {function(number, number):number} calculate - A function that takes two numbers and returns a number
+     */
+
+    /**
+     * @param dbName name of database
+     * @param {function(this: MyContext):void} callback
+     * @param isForceMigration
+     */
+    EasyDB.migrate = async function(dbName, callback, isForceMigration=false) {
+
+        isForceMigration = isForceMigration || false;
+
+        const context = function(self) {
+            this.testMe = function() {
+                console.log("testMe function called!");
+            }
+
+            this.URL = function(url, ...args) {
+                if(!url.endsWith('.js')) {
+                    url = `${url}.js`;
+                }
+                return new URL(url, ...args);
+            }
+
+            this.createStore = function({storeName, keyPath, autoIncrement, indexes}) {
+                return Migrations.Create.Store({storeName: storeName, keyPath: keyPath, autoIncrement: autoIncrement, indexes: indexes});
+            }
+
+
+        }
+
+        const self = this;
+
+        return new Promise(async (resolve, reject) => {
+            callback = callback.bind(new context(self));
+            const migrations = callback();
+
+            try {
+                await migrateDatabase({dbName: dbName, migrations: migrations, isForceMigration: isForceMigration});
+                resolve();
+            }
+            catch(e) {
+                reject();
+            }
+
+        });
     }
 
     EasyDB.getDatabase = async function({dbName, version, options, isCreateIfNotExists = false}) {
@@ -988,7 +1081,7 @@
 
     async function onDBOpen(dbName) {
         return new Promise((resolve, reject) => {
-            EasyDB._MigrationPromises[dbName].then(() => {
+            _MigrationPromises[dbName].then(() => {
                 console.log('db is ready!');
                 resolve();
             });
@@ -1008,63 +1101,58 @@
 
     }
 
-    EasyDB.Create = {
-        Store: function({storeName, keyPath='id', autoIncrement=true, indexes}) {
+    const Migrations = {
+        Create: {
+            Store: function({storeName, keyPath='id', autoIncrement=true, indexes}) {
 
-            let args = arguments;
-            class CreateStore extends MigrationAction {
-                constructor({db, trx}) {
-                    super({db: db, trx: trx, ...args});
+                let args = arguments;
+                class CreateStore extends MigrationAction {
+                    constructor({db, trx}) {
+                        super({db: db, trx: trx, ...args});
+                    }
+
+                    process() {
+                        return new Promise(async (resolve, reject) => {
+                            let store = this._db.createObjectStore(storeName, {keyPath: keyPath, autoIncrement: autoIncrement});
+
+                            if(indexes) {
+                                indexes.forEach(index => {
+                                    let indexKeyPath = index.keyPath || index.name;
+                                    if(index.options) {
+                                        store.createIndex(index.name, indexKeyPath, index.options);
+                                    }
+                                    else {
+                                        store.createIndex(index.name, indexKeyPath);
+                                    }
+
+                                });
+                                resolve(store);
+                            }
+                        });
+                    }
+
                 }
-
-                process() {
+                CreateStore.calculatedHash = createHash(args);
+                return CreateStore;
+            },
+            Index: function({storeName, indexName, keyPath, options}) {
+                let CreateIndex = async function({db, trx}) {
                     return new Promise(async (resolve, reject) => {
-                        let store = this._db.createObjectStore(storeName, {keyPath: keyPath, autoIncrement: autoIncrement});
-
-                        if(indexes) {
-                            indexes.forEach(index => {
-                                let indexKeyPath = index.keyPath || index.name;
-                                if(index.options) {
-                                    store.createIndex(index.name, indexKeyPath, index.options);
-                                }
-                                else {
-                                    store.createIndex(index.name, indexKeyPath);
-                                }
-
-                            });
-                            resolve(store);
+                        const store = trx.objectStore(storeName);
+                        let index = null;
+                        if (options) {
+                            index = store.createIndex(indexName, keyPath, options);
+                        } else {
+                            index = store.createIndex(indexName, keyPath);
                         }
+                        resolve(index);
                     });
                 }
-
+                return CreateIndex;
             }
-            CreateStore.calculatedHash = createHash(args);
-            return CreateStore;
-        },
-        Index: function({storeName, indexName, keyPath, options}) {
-            let CreateIndex = async function({db, trx}) {
-                return new Promise(async (resolve, reject) => {
-                    const store = trx.objectStore(storeName);
-                    let index = null;
-                    if (options) {
-                        index = store.createIndex(indexName, keyPath, options);
-                    } else {
-                        index = store.createIndex(indexName, keyPath);
-                    }
-                    resolve(index);
-                });
-            }
-            return CreateIndex;
         }
-    }
+    };
 
-    EasyDB.Update = {
-
-    }
-
-    EasyDB.Remove = {
-
-    }
 
     return EasyDB;
 })));

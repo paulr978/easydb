@@ -14,6 +14,7 @@
     EasyDB.isDebug = true;
     EasyDB.initialize();
 
+    /*
     EasyDB.migrateDatabase({dbName: 'testdb',
         migrations: [
             {url: EasyDB.URL('migrations/update6')},
@@ -27,9 +28,10 @@
                 ]}
         ]
     }).catch(() => {console.log('migration error caught!');});
+    */
 
-
-    EasyDB.getDatabase({dbName: 'testdb', isCreateIfNotExists: true}).then(db => {
+    /*
+    EasyDB.getDatabase({dbName: 'testdb'}).then(db => {
 
         console.log('me1111', this);
 
@@ -38,12 +40,32 @@
             static storeName = 'mystore1';
         }
 
-        db.executeWrite([MyModel], function(myModel) {
-            console.log('myModel', myModel);
-        });
+        //db.executeWrite([MyModel], function(myModel) {
+        //    console.log('myModel', myModel);
+        //});
 
     });
+    */
 
+    EasyDB.migrate('testdb', function() {
+        console.log(this);
+
+        let a = 1;
+        let b = 2;
+        let c = 3;
+
+        return [
+            {url: this.URL('migrations/update6', {a: a})},
+            {url: this.URL('migrations/update7', {b: b, c: c})},
+            {scriptId: 'id_2', runAfterId: 'id_1', upgradeSteps: [
+                    this.createStore({storeName: 'mystore3'})
+                ]},
+            {scriptId: 'id_1', runAfterId: 'id_initial', upgradeSteps: [this.createStore({storeName: 'mystore2'})]},
+            {scriptId: 'id_initial', runAfterId: null, upgradeSteps: [
+                    this.createStore({storeName: 'mystore1'})
+                ]}
+        ];
+    }).catch(() => {console.log('migration error caught!');});
 
 
 </script>
