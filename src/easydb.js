@@ -276,13 +276,14 @@
     }
 
     async function preProcessMigrations({dbId, upgradeHistory, migrations}){
-        let store = mgmtDB._database.transaction([MIGRATION_HISTORY_DATASTORE_NAME], 'readonly').objectStore(MIGRATION_HISTORY_DATASTORE_NAME);
 
         return new Promise((resolve, reject) => {
+            let processedScriptIds = [];
             let results = [];
             for(let i = 0; i < migrations.length; i++) {
                 let mig = migrations[i];
 
+                /*
                 if (upgradeHistory.length === 0) {
                     results.push(mig);
                 }
@@ -306,6 +307,29 @@
 
                     results.push(mig);
                 }
+                */
+
+                if(processedScriptIds.includes(mig.scriptId)) {
+                    reject(new EasyDBException('Error while preprocessing migrations. Script with same id already processed!.', mig));
+                }
+
+                if(upgradeHistory.length > 0) {
+                    let upg = upgradeHistory[i];
+                    if(upg !== undefined) {
+                        if(upg.script_id === mig.scriptId && upg.hash === mig.hash) {
+                            continue;
+                        }
+                        else if(upg.script_id === mig.scriptId && upg.hash !== mig.hash) {
+                            reject(new EasyDBException('Error while preprocessing migrations. Changes were detected in already committed migration script.', mig, upg));
+                        }
+                        else if(upg.script_id !== mig.scriptId) {
+                            reject(new EasyDBException('Error while preprocessing migrations. New migration script must be added at the end.', mig, upg));
+                        }
+                    }
+                }
+
+                results.push(mig);
+                processedScriptIds.push(mig.scriptId);
             }
 
             for(let i = 0; i < upgradeHistory.length; i++) {
@@ -337,7 +361,7 @@
             variable.prototype.constructor === variable;
     }
 
-    async function processMigrations({db, trx, dbId, migrations}) {
+    async function processMigrations({db, trx, dbId, migrations, state}) {
         let migrationStore = trx.objectStore(MIGRATION_HISTORY_DATASTORE_NAME);
 
         return new Promise(async (resolve, reject) => {
@@ -357,7 +381,7 @@
                     }
 
                     try {
-                        let result = stepInstance.process();
+                        let result = stepInstance.process(state);
                         console.log('step result', result);
                     }
                     catch(e) {
@@ -505,9 +529,15 @@
         MakeGetter(this, 'isClosed', () => {return this._isClosed;});
     }
 
+    function loadScriptFromString(scriptString) {
+        const script = document.createElement('script');
+        script.text = scriptString;
+        document.body.appendChild(script);
+    }
+
     const _MigrationPromises = {};
 
-    const migrateDatabase = async function({dbName, migrations, isForceMigration=false}) {
+    const migrateDatabase = async function({dbName, migrations, state, isForceMigration=false}) {
         let _migrationLoadedPromises = [];
         let _migrationsInOrder = [];
         let _migrationsById = {};
@@ -553,10 +583,12 @@
 
                     let userCode = await response.text();
 
+                    let serializedArgs = JSON.stringify(url.args);
+
                     userCode = `
                         return (async function() {
                             return await ${userCode}
-                        }).call(thisArg);
+                        }).call(${serializedArgs});
                     `;
 
                     let argNames = [];
@@ -569,8 +601,9 @@
                     console.log('argNames', argNames);
                     console.log('argValues', argValues);
 
-                    const f = new Function('EasyDB', 'thisArg', ...argNames, userCode);
-                    const r = await f.call(thisArg, context, thisArg, ...argValues);
+                    const f = new Function('EasyDB', 'thisArg', '_migrationState', ...argNames, userCode);
+                    const r = await f.call(thisArg, context, thisArg, state, ...argValues);
+
                     console.log('script result', r);
 
                     if(Array.isArray(r)) {
@@ -695,7 +728,7 @@
                             reject();
                         };
 
-                        let appliedMigrations = await processMigrations({db: dbToUpgrade, trx: trx, dbId: db.dbId, migrations: migrationUpdates});
+                        let appliedMigrations = await processMigrations({db: dbToUpgrade, trx: trx, dbId: db.dbId, migrations: migrationUpdates, state: state});
 
                     }}, async () => {
                         db.close();
@@ -721,12 +754,49 @@
         return migrationPromise;
     }
 
+    const MigrationContext = function(self, state) {
+
+        this.URL = function(url, ...args) {
+            if(!url.endsWith('.js')) {
+                url = `${url}.js`;
+            }
+            return new URL(url, ...args);
+        }
+
+        this.createStore = function({storeName, keyPath, autoIncrement, indexes}) {
+            return Migrations.Create.Store({storeName: storeName, keyPath: keyPath, autoIncrement: autoIncrement, indexes: indexes});
+        }
+
+        this.createIndex = function({storeName, indexName, keyPath, options}) {
+            return Migrations.Create.Index({storeName: storeName, indexName: indexName, keyPath: keyPath, options: options});
+        }
+
+        this.executeScript = function(callback) {
+            return Migrations.Exec(callback);
+        }
+
+        this.store = function(storeName) {
+            return
+        }
+
+        this.index = function(storeName, indexName) {
+
+        }
+
+    }
+
     EasyDB.script = async function(callback) {
+        const self = this;
+        console.log('migrationState', this);
+
+        callback = callback.bind(new MigrationContext(self));
         let result = await callback();
         return new Promise(async (resolve, reject) => {
             resolve(result);
         });
     }
+
+    const migrationState = {};
 
     /**
      * @typedef {Object} MyContext
@@ -740,37 +810,25 @@
      * @param {function(this: MyContext):void} callback
      * @param isForceMigration
      */
-    EasyDB.migrate = async function(dbName, callback, isForceMigration=false) {
+    EasyDB.migrate = async function(callback, dbName, isForceMigration=false) {
+
+        let state = migrationState[dbName];
+
+        if(state === undefined) {
+            state = {};
+            migrationState[dbName] = state;
+        }
 
         isForceMigration = isForceMigration || false;
-
-        const context = function(self) {
-            this.testMe = function() {
-                console.log("testMe function called!");
-            }
-
-            this.URL = function(url, ...args) {
-                if(!url.endsWith('.js')) {
-                    url = `${url}.js`;
-                }
-                return new URL(url, ...args);
-            }
-
-            this.createStore = function({storeName, keyPath, autoIncrement, indexes}) {
-                return Migrations.Create.Store({storeName: storeName, keyPath: keyPath, autoIncrement: autoIncrement, indexes: indexes});
-            }
-
-
-        }
 
         const self = this;
 
         return new Promise(async (resolve, reject) => {
-            callback = callback.bind(new context(self));
+            callback = callback.bind(new MigrationContext(self, state));
             const migrations = callback();
 
             try {
-                await migrateDatabase({dbName: dbName, migrations: migrations, isForceMigration: isForceMigration});
+                await migrateDatabase({dbName: dbName, migrations: migrations, state: state, isForceMigration: isForceMigration});
                 resolve();
             }
             catch(e) {
@@ -1095,13 +1153,31 @@
             this._args = args;
         }
 
-        process() {
+        process(state) {
             return null;
         }
 
     }
 
     const Migrations = {
+        Exec: function(callback) {
+            let args = arguments;
+            class ExecScript extends MigrationAction {
+                constructor({db, trx}) {
+                    super({db: db, trx: trx, ...args});
+                }
+
+                process(state) {
+                    return new Promise(async (resolve, reject) => {
+                        let result = callback();
+                        resolve(result);
+                    });
+                }
+
+            }
+            ExecScript.calculatedHash = createHash(args + callback.toString());
+            return ExecScript;
+        },
         Create: {
             Store: function({storeName, keyPath='id', autoIncrement=true, indexes}) {
 
@@ -1111,7 +1187,7 @@
                         super({db: db, trx: trx, ...args});
                     }
 
-                    process() {
+                    process(state) {
                         return new Promise(async (resolve, reject) => {
                             let store = this._db.createObjectStore(storeName, {keyPath: keyPath, autoIncrement: autoIncrement});
 
@@ -1126,8 +1202,8 @@
                                     }
 
                                 });
-                                resolve(store);
                             }
+                            resolve(store);
                         });
                     }
 
@@ -1136,19 +1212,29 @@
                 return CreateStore;
             },
             Index: function({storeName, indexName, keyPath, options}) {
-                let CreateIndex = async function({db, trx}) {
-                    return new Promise(async (resolve, reject) => {
-                        const store = trx.objectStore(storeName);
-                        let index = null;
-                        if (options) {
-                            index = store.createIndex(indexName, keyPath, options);
-                        } else {
-                            index = store.createIndex(indexName, keyPath);
-                        }
-                        resolve(index);
-                    });
+                let args = arguments;
+                class CreateIndex extends MigrationAction {
+                    constructor({db, trx}) {
+                        super({db: db, trx: trx, ...args});
+                    }
+
+                    process(state) {
+                        return new Promise(async (resolve, reject) => {
+                            const store = this._trx.objectStore(storeName);
+                            let index = null;
+                            if (options) {
+                                index = store.createIndex(indexName, keyPath, options);
+                            } else {
+                                index = store.createIndex(indexName, keyPath);
+                            }
+                            resolve(index);
+                        });
+                    }
+
                 }
+                CreateIndex.calculatedHash = createHash(args);
                 return CreateIndex;
+
             }
         }
     };

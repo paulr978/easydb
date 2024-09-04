@@ -47,7 +47,7 @@
     });
     */
 
-    EasyDB.migrate('testdb', function() {
+    EasyDB.migrate(function() {
         console.log(this);
 
         let a = 1;
@@ -58,14 +58,16 @@
             {url: this.URL('migrations/update6', {a: a})},
             {url: this.URL('migrations/update7', {b: b, c: c})},
             {scriptId: 'id_2', runAfterId: 'id_1', upgradeSteps: [
-                    this.createStore({storeName: 'mystore3'})
+                    this.createStore({storeName: 'mystore3'}),
+                    this.executeScript(function(mystore3, index1) { console.log('i ran!!!!!!!!'); }, [this.store('mystore3'), this.index('mystore3', 'index1')])
                 ]},
             {scriptId: 'id_1', runAfterId: 'id_initial', upgradeSteps: [this.createStore({storeName: 'mystore2'})]},
             {scriptId: 'id_initial', runAfterId: null, upgradeSteps: [
                     this.createStore({storeName: 'mystore1'})
-                ]}
+                ]},
+            {url: this.URL('migrations/update8')},
         ];
-    }).catch(() => {console.log('migration error caught!');});
+    }, 'testdb').catch((e) => {console.log('migration error caught!', e);});
 
 
 </script>

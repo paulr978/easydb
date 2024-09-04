@@ -2,7 +2,7 @@
 
 EasyDB.script(() => {
 
-    console.log('inside a');
+    console.log('inside update 6', _migrationState);
 
     return [
         {scriptId: 'id_6', runAfterId: 'id_2', upgradeSteps: []},
